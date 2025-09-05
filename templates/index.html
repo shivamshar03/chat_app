@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>FastAPI + Socket.IO Chat & Video</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js" crossorigin="anonymous"></script>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 0; padding: 0;
+      display: flex; flex-direction: column; align-items: center;
+      background: #f0f2f5;
+    }
+    h1 { margin: 10px; }
+    .container {
+      width: 95%; max-width: 1200px;
+      display: flex; flex-direction: row;
+      gap: 20px; margin-top: 20px;
+    }
+    .chat-box, .video-box {
+      flex: 1;
+      background: #fff;
+      border-radius: 8px;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.1);
+      padding: 15px;
+    }
+    .chat-box {
+      display: flex; flex-direction: column; height: 600px;
+    }
+    .chat-messages {
+      flex: 1; overflow-y: auto; border: 1px solid #ddd; padding: 10px;
+      margin-bottom: 10px; border-radius: 6px;
+    }
+    .chat-messages ul { list-style: none; padding: 0; margin: 0; }
+    .chat-messages li { margin-bottom: 5px; }
+    .video-container {
+      display: flex; flex-direction: column; align-items: center;
+    }
+    video {
+      width: 100%; max-width: 500px;
+      background: #000; border-radius: 8px;
+      margin-bottom: 10px;
+    }
+    .controls button {
+      margin: 5px; padding: 10px 15px;
+      border: none; border-radius: 6px;
+      cursor: pointer; font-weight: bold;
+    }
+    .controls button:hover {
+      background: #007bff; color: #fff;
+    }
+    input {
+      padding: 8px; margin: 3px;
+      border: 1px solid #ccc; border-radius: 4px;
+    }
+  </style>
+</head>
+<body>
+  <h1>⚡ FastAPI + Socket.IO Chat & Video</h1>
+
+  <div class="container">
+    <!-- Chat Section -->
+    <div class="chat-box">
+      <div class="config">
+        <input id="username" placeholder="Choose a username" />
+        <input id="room" placeholder="Room (e.g., general)" value="general" />
+        <button id="set-username">Set Username</button>
+        <button id="join">Join Room</button>
+        <button id="leave">Leave Room</button>
+      </div>
+
+      <div id="status" class="status">Connecting...</div>
+
+      <div class="chat-messages">
+        <ul id="messages"></ul>
+      </div>
+
+      <form id="form" action="">
+        <input id="input" autocomplete="off" placeholder="Type a message" />
+        <button type="submit">Send</button>
+      </form>
+    </div>
+
+    <!-- Video Section -->
+    <div class="video-box">
+      <div class="video-container">
+        <video id="localVideo" autoplay playsinline muted></video>
+        <video id="remoteVideo" autoplay playsinline></video>
+      </div>
+      <div class="controls">
+        <button id="startCall">🎥 Start Call</button>
+        <button id="endCall">🛑 End Call</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const statusEl = document.getElementById("status");
+    const messagesEl = document.getElementById("messages");
+    const form = document.getElementById("form");
+    const input = document.getElementById("input");
+    const roomInput = document.getElementById("room");
+    const usernameInput = document.getElementById("username");
+
+    // Connect to backend
+    const socket = io("/");
+    let currentRoom = "general";
+    let localStream, peerConnection;
+
+    const rtcConfig = {
+      iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+    };
+
+    socket.on("connect", () => {
+      statusEl.textContent = "Connected (" + socket.id + ")";
+    });
+
+    socket.on("disconnect", () => {
+      statusEl.textContent = "Disconnected";
+    });
+
+    socket.on("server_message", (data) => addMessage("[server] " + data.message));
+    socket.on("username_set", (data) => addMessage("[server] Username set to " + data.username));
+    socket.on("user_joined", (data) => addMessage(`🔵 ${data.username} joined ${data.room}`));
+    socket.on("user_left", (data) => addMessage(`🔴 ${data.username} left ${data.room}`));
+
+    socket.on("recent_messages", (data) => {
+      addMessage(`[server] Recent messages in ${data.room}:`);
+      data.messages.forEach(m => addMessage(`${m.username}: ${m.message}`));
+    });
+
+    socket.on("new_message", (data) => {
+      addMessage(`${data.username} (${data.room}): ${data.message}`);
+    });
+
+    // ---- Video Signaling ----
+    document.getElementById("startCall").onclick = async () => {
+      localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      document.getElementById("localVideo").srcObject = localStream;
+
+      peerConnection = new RTCPeerConnection(rtcConfig);
+      localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
+
+      peerConnection.onicecandidate = ({ candidate }) => {
+        if (candidate) socket.emit("ice_candidate", { room: currentRoom, candidate, from: socket.id });
+      };
+
+      peerConnection.ontrack = (event) => {
+        document.getElementById("remoteVideo").srcObject = event.streams[0];
+      };
+
+      const offer = await peerConnection.createOffer();
+      await peerConnection.setLocalDescription(offer);
+      socket.emit("offer", { room: currentRoom, offer, from: socket.id });
+    };
+
+    document.getElementById("endCall").onclick = () => {
+      if (peerConnection) {
+        peerConnection.close();
+        peerConnection = null;
+        document.getElementById("localVideo").srcObject = null;
+        document.getElementById("remoteVideo").srcObject = null;
+      }
+    };
+
+    socket.on("offer", async ({ sid, offer }) => {
+      localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      document.getElementById("localVideo").srcObject = localStream;
+
+      peerConnection = new RTCPeerConnection(rtcConfig);
+      localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
+
+      peerConnection.ontrack = (event) => {
+        document.getElementById("remoteVideo").srcObject = event.streams[0];
+      };
+
+      await peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
+      const answer = await peerConnection.createAnswer();
+      await peerConnection.setLocalDescription(answer);
+
+      socket.emit("answer", { room: currentRoom, answer, from: socket.id });
+    });
+
+    socket.on("answer", async ({ answer }) => {
+      if (peerConnection) {
+        await peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
+      }
+    });
+
+    socket.on("ice_candidate", async ({ candidate }) => {
+      if (peerConnection && candidate) {
+        await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+      }
+    });
+
+    // ---- Chat UI ----
+    function addMessage(text) {
+      const item = document.createElement("li");
+      item.textContent = text;
+      messagesEl.appendChild(item);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
+    document.getElementById("set-username").onclick = () => {
+      socket.emit("set_username", { username: usernameInput.value || "guest" });
+    };
+
+    document.getElementById("join").onclick = () => {
+      currentRoom = roomInput.value || "general";
+      socket.emit("join_room", { room: currentRoom });
+      fetch(`/rooms/${encodeURIComponent(currentRoom)}/recent`)
+        .then(r => r.json())
+        .then(d => {
+          if (d.messages?.length) {
+            addMessage(`[rest] Recent in ${d.room}:`);
+            d.messages.forEach(m => addMessage(`${m.username}: ${m.message}`));
+          }
+        }).catch(() => {});
+    };
+
+    document.getElementById("leave").onclick = () => {
+      socket.emit("leave_room", { room: currentRoom });
+    };
+
+    form.addEventListener("submit", function(e) {
+      e.preventDefault();
+      if (input.value) {
+        socket.emit("send_message", { room: currentRoom, message: input.value });
+        input.value = "";
+      }
+    });
+  </script>
+</body>
+</html>
